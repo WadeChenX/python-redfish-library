@@ -17,6 +17,10 @@ import base64
 import urllib
 import logging
 import inspect
+import codecs
+import uuid
+import io
+import mimetypes
 
 from collections import (OrderedDict)
 
@@ -101,6 +105,59 @@ class RisObject(dict):
         else:
             return value
 
+
+class MultipartFormdataEncoder(object):
+    def __init__(self):
+        self.boundary = uuid.uuid4().hex
+        self.content_type = 'multipart/form-data; boundary={}'.format(self.boundary)
+
+    @classmethod
+    def u(cls, s):
+        if sys.version_info < (3,) and isinstance(s, str):
+            s = s.decode('utf-8')
+        if sys.version_info >= (3,) and isinstance(s, bytes):
+            s = s.decode('utf-8')
+        return s
+
+    def iter(self, fields, files):
+        """
+        fields is a sequence of (name, value) elements for regular form fields.
+        files is a sequence of (name, filename, file-type) elements for data to be uploaded as files
+        Yield body's chunk as bytes
+        """
+        encoder = codecs.getencoder('utf-8')
+        for (key, value) in fields:
+            key = self.u(key)
+            yield encoder('--{}\r\n'.format(self.boundary))
+            yield encoder(self.u('Content-Disposition: form-data; name="{}"\r\n').format(key))
+            yield encoder('\r\n')
+            if isinstance(value, int) or isinstance(value, float):
+                value = str(value)
+            yield encoder(self.u(value))
+            yield encoder('\r\n')
+
+        for (key, filename, fpath) in files:
+            key = self.u(key)
+            filename = self.u(filename)
+            yield encoder('--{}\r\n'.format(self.boundary))
+            yield encoder(self.u('Content-Disposition: form-data; name="{}"; filename="{}"\r\n').format(key, filename))
+            yield encoder('Content-Type: {}\r\n'.format(mimetypes.guess_type(filename)[0] or 'application/octet-stream'))
+            yield encoder('\r\n')
+            with open(fpath,'rb') as fd:
+                buff = fd.read()
+                yield (buff, len(buff))
+                yield encoder('\r\n')
+            yield encoder('--{}--\r\n'.format(self.boundary))
+
+    def encode(self, fields, files):
+        body = io.BytesIO()
+        for chunk, chunk_len in self.iter(fields, files):
+            body.write(chunk)
+
+        return self.content_type, body.getvalue()
+
+
+
 class RestRequest(object):
     """Holder for Request information"""
     def __init__(self, path, method='GET', body=''):
@@ -150,6 +207,8 @@ class RestRequest(object):
             strvars['body'] = ''
 
         return "%(method)s %(path)s\n\n%(body)s" % strvars
+
+
 
 class RestResponse(object):
     """Returned by Rest requests"""
@@ -665,7 +724,7 @@ class RestClientBase(object):
         return self._rest_request(path, method='HEAD', args=args, \
                                                                 headers=headers)
 
-    def post(self, path, args=None, body=None, headers=None):
+    def post(self, path, args=None, body=None, headers=None, files=None):
         """Perform a POST request
 
         :param path: the URL path.
@@ -680,7 +739,7 @@ class RestClientBase(object):
 
         """
         return self._rest_request(path, method='POST', args=args, body=body, \
-                                                                headers=headers)
+                                                        headers=headers, files=files)
 
     def put(self, path, args=None, body=None, headers=None):
         """Perform a PUT request
@@ -755,7 +814,7 @@ class RestClientBase(object):
         return headers
 
     def _rest_request(self, path, method='GET', args=None, body=None, \
-                                                                headers=None):
+                                                headers=None, files=None):
         """Rest request main function
 
         :param path: path within tree
@@ -768,6 +827,8 @@ class RestClientBase(object):
         :type body: dict
         :param headers: provide additional headers
         :type headers: dict
+        :param files: provide file attatchments
+        :type files: list of [ (key1, filename1, path1), (key2, filename2, path2), ... ]
         :returns: returns a RestResponse object
 
         """
@@ -808,6 +869,12 @@ class RestClientBase(object):
                     raise
 
             headers['Content-Length'] = len(body)
+
+        elif files is not None:
+            content_type, body = MultipartFormdataEncoder().encode({}, files)
+            headers['Content-Type'] = content_type
+            headers['Content-Length'] = len(body)
+
 
         if args:
             if method == 'GET':
@@ -1046,7 +1113,7 @@ class HttpClient(RestClientBase):
             self.login_url = '/redfish/v1/SessionService/Sessions'
 
     def _rest_request(self, path='', method="GET", args=None, body=None,
-                                                                headers=None):
+                                                       headers=None, files=None):
         """Rest request for HTTP client
 
         :param path: path within tree
@@ -1058,6 +1125,8 @@ class HttpClient(RestClientBase):
         :param body: body payload for the rest call
         :type body: dict
         :param headers: provide additional headers
+        :param files: provide file attatchments
+        :type files: list of [ (key1, filename1, path1), (key2, filename2, path2), ... ]
         :type headers: dict
         :returns: returns a rest request
 
@@ -1068,7 +1137,7 @@ class HttpClient(RestClientBase):
             pass
 
         return super(HttpClient, self)._rest_request(path=path, method=method, \
-                                         args=args, body=body, headers=headers)
+                                         args=args, body=body, headers=headers, files=files)
 
     def _get_req_headers(self, headers=None, providerheader=None):
         """Get the request headers for HTTP client
